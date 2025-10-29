@@ -1,22 +1,37 @@
-# train_ner.py (Improved)
 import numpy as np
 import warnings
-from datasets import load_from_disk
-from transformers import AutoTokenizer, AutoModelForTokenClassification, DataCollatorForTokenClassification
-from transformers import TrainingArguments, Trainer
+from datasets import load_from_disk, DatasetDict
+from transformers import (
+    AutoTokenizer,
+    AutoModelForTokenClassification,
+    DataCollatorForTokenClassification,
+    TrainingArguments,
+    Trainer
+)
 import evaluate
 
 warnings.filterwarnings("ignore")
 
-# -----------------------------------------------------
-# Step 1. 加载数据集
-# -----------------------------------------------------
-dataset = load_from_disk("./processed_data")
-print("✅ Dataset loaded:", dataset)
 
-# -----------------------------------------------------
-# Step 2. 加载 tokenizer & model
-# -----------------------------------------------------
+# Step 1. Load Dataset
+
+dataset = load_from_disk("./processed_data_full")
+print("Dataset loaded:", dataset)
+
+
+if "test" not in dataset:
+    print("No test split found. Creating test split (10% of train)...")
+    split_dataset = dataset["train"].train_test_split(test_size=0.1, seed=42)
+    dataset = DatasetDict({
+        "train": split_dataset["train"],
+        "validation": dataset["validation"],
+        "test": split_dataset["test"]
+    })
+    print("Added test split:", dataset)
+
+
+# Step 2. Tokenizer & Model
+
 model_name = "emilyalsentzer/Bio_ClinicalBERT"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -26,14 +41,14 @@ id_to_label = {i: label for i, label in enumerate(label_list)}
 
 model = AutoModelForTokenClassification.from_pretrained(
     model_name,
-    num_labels=len(label_list),  # ✅ 修正
+    num_labels=len(label_list),
     trust_remote_code=True,
     use_safetensors=True
 )
 
-# -----------------------------------------------------
-# Step 3. Tokenize + 对齐标签
-# -----------------------------------------------------
+
+# Step 3. Tokenize & Align Labels
+
 def tokenize_and_align_labels(examples):
     tokenized_inputs = tokenizer(
         examples["tokens"],
@@ -60,11 +75,20 @@ def tokenize_and_align_labels(examples):
     return tokenized_inputs
 
 tokenized_datasets = dataset.map(tokenize_and_align_labels, batched=True)
-print("✅ Tokenization done.")
+print("Tokenization done.")
 
-# -----------------------------------------------------
-# Step 4. Trainer 设置
-# -----------------------------------------------------
+
+
+example = tokenized_datasets["train"][0]
+tokens = tokenizer.convert_ids_to_tokens(example["input_ids"])
+labels = [id_to_label.get(l, "IGN") for l in example["labels"][:30]]
+print("\n🔍 Token-label alignment check (first 30 tokens):")
+for t, l in zip(tokens[:30], labels):
+    print(f"{t:15s} -> {l}")
+
+
+# Step 4. Metrics
+
 data_collator = DataCollatorForTokenClassification(tokenizer)
 metric = evaluate.load("seqeval")
 
@@ -83,7 +107,6 @@ def compute_metrics(eval_pred):
 
     results = metric.compute(predictions=true_predictions, references=true_labels)
 
-    # 输出每个实体类别的详细指标
     detailed = {}
     for entity_type, scores in results.items():
         if isinstance(scores, dict) and "precision" in scores:
@@ -99,44 +122,43 @@ def compute_metrics(eval_pred):
     }
     return {**overall, **detailed}
 
-# -----------------------------------------------------
-# Step 5. TrainingArguments
-# -----------------------------------------------------
+
+# Step 5. Training Arguments
+
 try:
     training_args = TrainingArguments(
         output_dir="./results",
-        evaluation_strategy="epoch",
-        learning_rate=3e-5,
+        evaluation_strategy="epoch",  
+        learning_rate=5e-5,           
         per_device_train_batch_size=4,
         per_device_eval_batch_size=4,
-        num_train_epochs=8,
+        num_train_epochs=15,       
         weight_decay=0.01,
-        warmup_ratio=0.1,
+        warmup_ratio=0.05,           
         logging_dir="./logs",
         save_strategy="epoch",
         save_total_limit=2,
         report_to="none"
-)
+    )
 except TypeError:
-    # ✅ 向下兼容旧版本
     training_args = TrainingArguments(
         output_dir="./results",
-        eval_strategy="epoch",
+        eval_strategy="epoch",       
         learning_rate=2e-5,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
-        num_train_epochs=15,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        num_train_epochs=30,
         weight_decay=0.01,
         logging_dir="./logs",
         save_strategy="epoch",
-        warmup_ratio=0.2,
+        warmup_ratio=0.05,
         save_total_limit=2,
         report_to="none"
     )
 
-# -----------------------------------------------------
-# Step 6. 初始化 Trainer
-# -----------------------------------------------------
+
+# Step 6. Trainer
+
 trainer = Trainer(
     model=model,
     args=training_args,
@@ -147,17 +169,22 @@ trainer = Trainer(
     compute_metrics=compute_metrics
 )
 
-# -----------------------------------------------------
-# Step 7. 训练与保存
-# -----------------------------------------------------
+
 trainer.train()
 trainer.save_model("./clinicalbert_ner_model")
-print("\n✅ Model training finished and saved to ./clinicalbert_ner_model")
+print("\nModel training finished and saved to ./clinicalbert_ner_model")
 
-# -----------------------------------------------------
-# Step 8. 打印最终结果
-# -----------------------------------------------------
-final_metrics = trainer.evaluate()
-print("\n📊 Final Evaluation Metrics:")
-for k, v in final_metrics.items():
+
+# Step 8. Evaluate on Validation and Test Sets
+
+print("\nValidation Set Evaluation:")
+val_metrics = trainer.evaluate(tokenized_datasets["validation"])
+for k, v in val_metrics.items():
     print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+
+print("\nTest Set Evaluation:")
+test_metrics = trainer.evaluate(tokenized_datasets["test"])
+for k, v in test_metrics.items():
+    print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+
+print("\nAll evaluations complete.")
