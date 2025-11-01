@@ -31,8 +31,10 @@ def parse_con_file(con_path: str) -> List[Tuple[int, int, int, int, str]]:
                 continue
             label = label_match.group(1)
             start_line, start_idx = map(int, span_matches[0].split(":"))
+            start_line -= 1
             if len(span_matches) > 1:
                 end_line, end_idx = map(int, span_matches[1].split(":"))
+                end_line -= 1
             else:
                 end_line, end_idx = start_line, start_idx
             entities.append((start_line, start_idx, end_line, end_idx, label))
@@ -235,6 +237,7 @@ def train_ner_model() -> None:
 
     args = TrainingArguments(
         output_dir="./ner_results",
+        overwrite_output_dir=True,
         evaluation_strategy="epoch",
         save_strategy="epoch",
         learning_rate=3e-5,
@@ -298,6 +301,47 @@ def train_ner_model() -> None:
     report = classification_report(true_labels, true_preds, digits=4)
     print("\nDetailed classification report:")
     print(report)
+
+    error_cases = []
+    for tokens, gold_seq, pred_seq in zip(test["tokens"], true_labels, true_preds):
+        aligned_tokens = tokens[:len(gold_seq)]
+        mismatches = [
+            (tok, gold, pred)
+            for tok, gold, pred in zip(aligned_tokens, gold_seq, pred_seq)
+            if gold != pred
+        ]
+        if mismatches:
+            error_cases.append(
+                {
+                    "tokens": aligned_tokens,
+                    "gold": gold_seq,
+                    "pred": pred_seq,
+                    "mismatches": mismatches,
+                }
+            )
+
+    os.makedirs("./ner_results", exist_ok=True)
+    error_path = os.path.join("ner_results", "error_cases.txt")
+    with open(error_path, "w") as f:
+        f.write("Top error cases (token, gold, pred):\n\n")
+        for idx, case in enumerate(error_cases[:50], start=1):
+            f.write(f"Case {idx}:\n")
+            f.write("Tokens : " + " ".join(case["tokens"]) + "\n")
+            f.write("Gold   : " + " ".join(case["gold"]) + "\n")
+            f.write("Pred   : " + " ".join(case["pred"]) + "\n")
+            f.write("Mismatches:\n")
+            for tok, gold, pred in case["mismatches"]:
+                f.write(f"  {tok}\t{gold}\t{pred}\n")
+            f.write("\n")
+
+    if error_cases:
+        print("\nSample mismatches:")
+        for case in error_cases[:3]:
+            print("Tokens :", " ".join(case["tokens"]))
+            print("Gold   :", " ".join(case["gold"]))
+            print("Pred   :", " ".join(case["pred"]))
+            print("----")
+    print(f"\nSaved mismatch examples to {error_path}")
 
     with open("ner_detailed_report.txt", "w") as f:
         f.write("=== Overall Results ===\n")
